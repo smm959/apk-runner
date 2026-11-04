@@ -1,27 +1,23 @@
 # APK Runner
 
-Прослойка для macOS, которая запускает Android-приложения на Apple Silicon: **двойной клик по `.apk` или `.xapk` — приложение ставится в Android с Google Play и открывается**.
+Запуск Android-приложений на Apple Silicon Mac: **двойной клик по `.apk` или `.xapk` — приложение открывается в окне планшета**.
 
-Своего эмулятора внутри нет: APK Runner — это удобная оболочка над официальным Android Emulator из Android SDK. Она сама поднимает виртуальное устройство, ставит пакет (включая сплиты и OBB-данные) и следит за тем, чтобы ошибки были понятны.
+Помощник не висит в Dock и не держит окон: он живёт в строке меню, запускается в момент открытия файла и закрывается сам через три минуты бездействия. Внутри — официальный Android Emulator (Android 16, Google Play, arm64).
 
-![APK Runner](docs/screenshots/app.png)
+| Меню в строке меню | Окно планшета |
+|---|---|
+| ![Меню](docs/screenshots/menubar.png) | ![Планшет](docs/screenshots/tablet.png) |
 
 ## Возможности
 
-- **Установка двойным кликом.** Прослойка регистрируется как обработчик `.apk`, `.xapk`, `.apks` и `.apkm`.
-- **XAPK как надо.** Распаковка, чтение `manifest.json`, установка `base.apk` + всех `config.*.apk` через `adb install-multiple`. Без этого Android отвечает `INSTALL_FAILED_MISSING_SPLIT`.
-- **OBB-данные.** Файлы `Android/obb/<пакет>/*.obb` из бандла копируются в `/sdcard/Android/obb/<пакет>/` — иначе игры стартуют с чёрным экраном.
-- **Настоящие названия.** Имя приложения берётся из APK через `aapt2 dump badging`, а не угадывается по имени пакета.
-- **Автозапуск Android.** Если устройство выключено, двойной клик по файлу сам его поднимет (быстрый старт из снапшота — секунды).
-- **Play Маркет и список приложений.** Запуск, удаление, обновление списка — из одного окна.
+- **Только строка меню.** Ни Dock-иконки, ни окон-панелей: приложение — фоновый помощник (`LSUIElement`).
+- **Запуск по требованию.** Клик по APK в Finder запускает помощник, тот поднимает Android (если выключен), ставит пакет и открывает приложение.
+- **Сам закрывается.** Через 3 минуты бездействия помощник выходит; Android продолжает работать. Автозакрытие отключается галочкой в меню.
+- **Планшетное окно.** AVD `Pixel Tablet`: 2560×1600, Android 16 с Google Play — приложения открываются в планшетной раскладке.
+- **XAPK как надо.** `base.apk` + все `config.*.apk` через `adb install-multiple`, OBB-данные копируются в `/sdcard/Android/obb/<пакет>/`.
+- **Настоящие названия приложений** из APK (`aapt2 dump badging`), а не из имени пакета.
 - **Понятные ошибки** вместо сырого вывода adb: не хватает сплитов, другая архитектура, не совпадает подпись, кончилось место.
 - **CLI** — `apk-run файл.xapk` делает то же самое из терминала.
-
-## Скриншоты
-
-| APK ставится и запускается | Play Маркет |
-|---|---|
-| ![TSEYE в Android](docs/screenshots/xapk-install.png) | ![Play Маркет](docs/screenshots/play-store.png) |
 
 ## Требования
 
@@ -35,7 +31,7 @@
 git clone https://github.com/smm959/apk-runner.git
 cd apk-runner
 
-# 1. Android SDK, образ с Google Play и виртуальное устройство
+# 1. Android SDK, образ с Google Play и планшетное виртуальное устройство
 ./scripts/setup-sdk.sh
 
 # 2. Сборка и установка в /Applications
@@ -53,11 +49,17 @@ brew install --cask android-commandlinetools
 
 ## Использование
 
-1. **Двойной клик по APK/XAPK в Finder** — Android поднимется, приложение установится и откроется.
-2. **Перетащить файл в окно APK Runner** — то же самое.
-3. **Play Маркет** кнопкой в окне — обычная установка, нужен вход в Google-аккаунт.
+- **Двойной клик по APK/XAPK в Finder** — Android поднимется, приложение установится и откроется в окне планшета.
+- **Меню в строке меню** (иконка планшета):
 
-Android живёт в отдельном окне `Emulator` и не зависит от окна прослойки: её можно закрыть.
+| Пункт | Что делает |
+|---|---|
+| `Play Маркет` | открыть магазин на устройстве |
+| `Открыть APK…` | выбрать файл вручную |
+| `Показать Android` | вывести окно планшета вперёд |
+| `Выключить Android` / `Запустить Android` | управление виртуальным устройством |
+| `Закрывать автоматически` | автовыход через 3 минуты бездействия |
+| `Лог эмулятора` | `/tmp/apkrunner-emulator.log` |
 
 ### Команды
 
@@ -76,33 +78,36 @@ apk-run shell          # adb-шелл
 ## Как это работает
 
 ```
-Finder ──двойной клик──▶ APK Runner.app ──▶ adb install / install-multiple
-                              │                      │
-                              │                      ▼
-                              └──▶ emulator -avd ──▶ Android 16 (Google Play, arm64)
-                                                     в виртуалке Apple Hypervisor
+Finder ──двойной клик──▶ APK Runner (агент в строке меню)
+                              │  adb install / install-multiple
+                              ▼
+                         emulator -avd AndroidTablet (Pixel Tablet 2560×1600)
+                              │
+                              ▼
+                         окно планшета с запущенным приложением
 ```
 
-- Интерфейс — SwiftUI, ~900 строк, без внешних зависимостей.
-- Весь Android-часть — стандартные `adb` и `emulator` из SDK; прослойка не патчит образ и не требует root.
-- Выбор пакета и сплитов — по `manifest.json` (XAPK) либо по всем `*.apk` в архиве (APKS/APKM), base первым.
+- Интерфейс — SwiftUI (`MenuBarExtra`), без внешних зависимостей.
+- Android-часть — стандартные `adb` и `emulator` из SDK; образ не патчится, root не нужен.
+- Сплиты выбираются по `manifest.json` (XAPK) либо по всем `*.apk` в архиве (APKS/APKM), base первым.
 - OBB копируются до первого запуска приложения.
 
 ## Ограничения
 
-- **Банковские приложения** (Сбер, Т-Банк, ВТБ, Госуслуги и подобные) и **игры с античитом** часто отказываются работать на эмуляторе: они проверяют признаки виртуалки. Это ограничение самих приложений.
-- **Зашифрованные `.apkm`** (часть файлов APKMirror) не поддерживаются: внутри не APK, а шифрованный контейнер. Прослойка откажет с объяснением.
-- Если в бандле **меньше сплитов**, чем у уже установленной версии, Android требует удалить приложение и поставить заново.
+- **Банковские приложения** (Сбер, Т-Банк, ВТБ, Госуслуги и подобные) и **игры с античитом** часто отказываются работать на эмуляторе — они проверяют признаки виртуалки.
+- **Зашифрованные `.apkm`** (часть файлов APKMirror) не поддерживаются: внутри не APK, а шифрованный контейнер.
+- Если в бандле **меньше сплитов**, чем у установленной версии, Android требует удалить приложение и поставить заново.
+- **Окно принадлежит эмулятору.** У него есть системный заголовок и боковая панель; панель закрывается крестиком, но при следующем запуске появляется снова. Убрать её совсем можно только заменив окно эмулятора на собственную трансляцию экрана (scrcpy), это отдельная задача.
 - Первый запуск macOS спросит разрешение «Локальные сети» — без него у Android не будет интернета.
 
 ## Структура
 
 ```
-src/APKRunnerApp.swift   интерфейс и логика установки
-src/Info.plist           бандл, обработчик .apk/.xapk
+src/APKRunnerApp.swift   агент в строке меню и логика установки
+src/Info.plist           бандл, LSUIElement, обработчик .apk/.xapk
 src/makeicon.swift       генератор иконки
 scripts/build.sh         сборка .app из исходников
-scripts/setup-sdk.sh     Android SDK, образ с Google Play, AVD
+scripts/setup-sdk.sh     Android SDK, образ с Google Play, планшетный AVD
 scripts/apk-run          консольный хелпер
 ```
 
@@ -110,13 +115,12 @@ scripts/apk-run          консольный хелпер
 
 ## English
 
-**APK Runner** runs Android apps on Apple Silicon Macs: double-click an `.apk` or `.xapk` and it is installed into an Android 16 device with Google Play, then opened.
+**APK Runner** runs Android apps on Apple Silicon Macs. Double-click an `.apk` or `.xapk` and it opens in a tablet window.
 
-It is a thin SwiftUI shell over the official Android Emulator — no custom VM, no root, no patched images.
+The helper has no Dock icon and no panels: it lives in the menu bar, starts when you open a file, and quits itself after three idle minutes. Under the hood it drives the official Android Emulator (Android 16, Google Play, arm64) on a Pixel Tablet AVD (2560×1600).
 
-- Handles `.apk`, `.xapk`, `.apks`, `.apkm`: reads `manifest.json`, installs `base.apk` plus all `config.*.apk` splits via `adb install-multiple`, and copies OBB payloads to `/sdcard/Android/obb/<package>/`.
-- App names come from `aapt2 dump badging`.
-- Boots the emulator on demand and reports human-readable install errors.
+- Handles `.apk`, `.xapk`, `.apks`, `.apkm`: reads `manifest.json`, installs `base.apk` plus all `config.*.apk` splits via `adb install-multiple`, copies OBB payloads to `/sdcard/Android/obb/<package>/`.
+- App names come from `aapt2 dump badging`; install errors are human-readable.
 - CLI: `apk-run file.xapk`, `apk-run start|stop|list|launch|remove|market|shot|shell`.
 
 Requirements: macOS 14+, Apple Silicon, Xcode CLI tools, ~13 GB disk.
@@ -127,7 +131,7 @@ git clone https://github.com/smm959/apk-runner.git && cd apk-runner
 ./scripts/build.sh --install
 ```
 
-Known limits: banking apps and anti-cheat games usually refuse to run on emulators; encrypted `.apkm` files are not supported.
+Known limits: banking apps and anti-cheat games usually refuse to run on emulators; encrypted `.apkm` files are not supported; the emulator window keeps its own title bar and a side panel.
 
 ## License
 

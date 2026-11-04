@@ -174,6 +174,9 @@ final class AndroidController: ObservableObject {
     @Published var apps: [AppInfo] = []
     @Published var lastLog = ""
     @Published var showLog = false
+    @Published var autoQuit = true
+    private var lastActivity = Date()
+    private var idleTimer: Timer?
     private var lastErrorText: String?
     private var messageAt = Date.distantPast
 
@@ -188,6 +191,29 @@ final class AndroidController: ObservableObject {
     private var currentSerial: String?
 
     var isReady: Bool { state == .running }
+
+    /// Отметить активность: пока она свежая, помощник не закрывается сам.
+    func touch() {
+        DispatchQueue.main.async { self.lastActivity = Date() }
+    }
+
+    func startIdleWatch() {
+        DispatchQueue.main.async {
+            self.lastActivity = Date()
+            self.idleTimer?.invalidate()
+            self.idleTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                guard self.autoQuit, !self.busy, self.state != .booting else { return }
+                if Date().timeIntervalSince(self.lastActivity) > 180 {
+                    NSApp.terminate(nil)
+                }
+            }
+        }
+    }
+
+    private func setBusy(_ value: Bool) {
+        DispatchQueue.main.async { self.busy = value }
+    }
 
     // MARK: lifecycle
 
@@ -288,7 +314,14 @@ final class AndroidController: ObservableObject {
 
     private func availableAVDs() -> [String] {
         let r = runProcess(tool("emulator/emulator"), ["-list-avds"], timeout: 30)
-        return r.out.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let all = r.out.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        if let wanted = ProcessInfo.processInfo.environment["APK_RUNNER_AVD"], all.contains(wanted) {
+            return [wanted] + all.filter { $0 != wanted }
+        }
+        if let tablet = all.first(where: { $0.lowercased().contains("tablet") }) {
+            return [tablet] + all.filter { $0 != tablet }
+        }
+        return all
     }
 
     private func detectSerial() -> String? {
@@ -368,6 +401,9 @@ final class AndroidController: ObservableObject {
                 self.publish(state: .error, message: "Android не запустился — установка отменена")
                 return
             }
+            self.setBusy(true)
+            self.touch()
+            defer { self.setBusy(false); self.touch() }
             var failed = false
             for url in urls {
                 if !self.installOne(url: url, serial: serial) { failed = true }
@@ -522,11 +558,19 @@ final class AndroidController: ObservableObject {
         }
     }
 
-    private func focusEmulator() {
+    func focusEmulator() {
         let pid = emulatorPID
         DispatchQueue.main.async {
-            guard let pid, let app = NSRunningApplication(processIdentifier: pid) else { return }
-            app.activate(options: [.activateAllWindows])
+            if let pid, let app = NSRunningApplication(processIdentifier: pid) {
+                app.activate(options: [.activateAllWindows])
+                return
+            }
+            // Эмулятор мог быть запущен не нами — ищем окно qemu среди процессов.
+            if let app = NSWorkspace.shared.runningApplications.first(where: {
+                $0.executableURL?.lastPathComponent.hasPrefix("qemu-system") == true
+            }) {
+                app.activate(options: [.activateAllWindows])
+            }
         }
     }
 
@@ -637,249 +681,83 @@ final class AndroidController: ObservableObject {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func application(_ application: NSApplication, open urls: [URL]) {
-        let apks = urls.filter { ["apk", "apks", "xapk", "apkm"].contains($0.pathExtension.lowercased()) }
-        guard !apks.isEmpty else { return }
-        NSApp.activate(ignoringOtherApps: true)
-        AndroidController.shared.install(urls: apks)
+        let files = urls.filter { ["apk", "apks", "xapk", "apkm"].contains($0.pathExtension.lowercased()) }
+        guard !files.isEmpty else { return }
+        AndroidController.shared.touch()
+        AndroidController.shared.install(urls: files)
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Живём только в строке меню: ни Dock-иконки, ни окон помощника.
+        NSApp.setActivationPolicy(.accessory)
+        AndroidController.shared.startIdleWatch()
+        AndroidController.shared.refresh()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
-
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
-        AndroidController.shared.refresh()
-    }
 }
 
-// MARK: - UI
+// MARK: - Menu bar
 
-struct StatusDot: View {
-    let state: EmuState
-    var color: Color {
-        switch state {
-        case .running: return .green
-        case .booting: return .orange
-        case .error: return .red
-        case .stopped: return .secondary
-        case .unknown: return .gray
-        }
-    }
-    var body: some View {
-        Circle().fill(color).frame(width: 9, height: 9)
-            .shadow(color: color.opacity(0.7), radius: 3)
-    }
-}
-
-struct DropZone: View {
-    @State private var targeted = false
+struct MenuView: View {
     @ObservedObject var ctl = AndroidController.shared
 
     var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "arrow.down.app.fill")
-                .font(.system(size: 40, weight: .light))
-                .foregroundStyle(targeted ? Color.accentColor : .secondary)
-            Text("Перетащи .apk или .xapk сюда")
-                .font(.system(size: 17, weight: .semibold))
-            Text("APK · XAPK · APKS · APKM — установлю со всеми сплитами и сразу открою")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-            Button("Выбрать файл…") { pickFiles() }
-                .controlSize(.regular)
-                .padding(.top, 2)
+        Text(ctl.message)
+
+        Divider()
+
+        Button("Play Маркет") { ctl.touch(); ctl.openPlayStore() }
+            .disabled(!ctl.isReady)
+
+        Button("Открыть APK…") { pickFile() }
+
+        Button("Показать Android") { ctl.touch(); ctl.focusEmulator() }
+            .disabled(ctl.state != .running)
+
+        Divider()
+
+        if ctl.isReady {
+            Button("Выключить Android") { ctl.touch(); ctl.shutdown() }
+        } else if ctl.state == .booting {
+            Text("Android загружается…")
+        } else {
+            Button("Запустить Android") { ctl.touch(); ctl.start() }
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 26)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color.accentColor.opacity(targeted ? 0.12 : 0.05))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [7, 5]))
-                .foregroundStyle(targeted ? Color.accentColor : Color.secondary.opacity(0.45))
-        )
-        .onDrop(of: [UTType.fileURL], isTargeted: $targeted) { providers in
-            var urls: [URL] = []
-            let group = DispatchGroup()
-            for provider in providers {
-                group.enter()
-                _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                    if let url { urls.append(url) }
-                    group.leave()
-                }
-            }
-            group.notify(queue: .main) {
-                let apks = urls.filter { ["apk", "apks", "xapk", "apkm"].contains($0.pathExtension.lowercased()) }
-                ctl.install(urls: apks.isEmpty ? urls : apks)
-            }
-            return true
+
+        Divider()
+
+        Toggle("Закрывать автоматически", isOn: $ctl.autoQuit)
+        Button("Лог эмулятора") {
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/tmp/apkrunner-emulator.log"))
         }
-        .padding(.horizontal, 20)
+        Button("Выход") { NSApp.terminate(nil) }
     }
 
-    func pickFiles() {
+    private func pickFile() {
+        NSApp.activate(ignoringOtherApps: true)
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.allowedContentTypes = ["apk", "apks", "xapk", "apkm"].compactMap { UTType(filenameExtension: $0) }
         panel.message = "Выбери APK-файл"
-        if panel.runModal() == .OK {
-            ctl.install(urls: panel.urls)
-        }
-    }
-}
-
-struct AppRow: View {
-    let app: AndroidController.AppInfo
-    @ObservedObject var ctl = AndroidController.shared
-    @State private var hover = false
-
-    var body: some View {
-        HStack(spacing: 10) {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(LinearGradient(colors: [Color.accentColor.opacity(0.85), Color.accentColor.opacity(0.55)],
-                                     startPoint: .top, endPoint: .bottom))
-                .frame(width: 30, height: 30)
-                .overlay(Text(String(app.label.prefix(1))).font(.system(size: 15, weight: .bold)).foregroundStyle(.white))
-            VStack(alignment: .leading, spacing: 1) {
-                Text(app.label).font(.system(size: 13, weight: .medium))
-                Text(app.id).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
-            }
-            Spacer()
-            Button {
-                ctl.launch(package: app.id)
-            } label: {
-                Image(systemName: "play.fill")
-            }
-            .buttonStyle(.borderless)
-            .help("Открыть")
-            Button {
-                ctl.uninstall(package: app.id)
-            } label: {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.borderless)
-            .help("Удалить")
-            .opacity(hover ? 1 : 0.35)
-        }
-        .padding(.vertical, 3)
-        .onHover { hover = $0 }
-    }
-}
-
-struct ContentView: View {
-    @ObservedObject var ctl = AndroidController.shared
-
-    var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            DropZone()
-            Divider().padding(.top, 18)
-            appList
-            Divider()
-            footer
-        }
-        .frame(minWidth: 520, minHeight: 560)
-    }
-
-    var header: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "candybarphone")
-                .font(.system(size: 26))
-                .foregroundStyle(Color.accentColor)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("APK Runner").font(.system(size: 15, weight: .bold))
-                HStack(spacing: 6) {
-                    StatusDot(state: ctl.state)
-                    Text(ctl.message).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                }
-            }
-            Spacer()
-            if ctl.state == .running {
-                Button("Play Маркет") { ctl.openPlayStore() }
-                Button("Стоп") { ctl.shutdown() }
-            } else if ctl.state == .booting {
-                ProgressView().controlSize(.small)
-                Button("Стоп") { ctl.shutdown() }
-            } else {
-                Button("Запустить Android") { ctl.start() }
-            }
-        }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 12)
-    }
-
-    var appList: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Установленные приложения").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    ctl.reloadApps()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.borderless)
-                .help("Обновить список")
-            }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 8)
-
-            if ctl.apps.isEmpty {
-                VStack(spacing: 6) {
-                    Text(ctl.state == .running ? "Пока пусто" : "Android выключен")
-                        .font(.system(size: 13, weight: .medium))
-                    Text(ctl.state == .running
-                         ? "Перетащи APK выше или поставь приложение через Play Маркет"
-                         : "Нажми «Запустить Android»")
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(ctl.apps) { app in
-                            AppRow(app: app)
-                            Divider().opacity(0.25)
-                        }
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 4)
-                }
-                .scrollIndicators(.hidden)
-            }
-        }
-        .frame(maxHeight: .infinity)
-    }
-
-    var footer: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "info.circle").font(.system(size: 10)).foregroundStyle(.secondary)
-            Text("Android работает в окне «Emulator». Файлы можно перетащить прямо в это окно")
-                .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
-            Spacer()
-            Button("Лог") { NSWorkspace.shared.open(URL(fileURLWithPath: "/tmp/apkrunner-emulator.log")) }
-                .buttonStyle(.borderless).font(.system(size: 10))
-        }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 8)
+        guard panel.runModal() == .OK else { return }
+        ctl.touch()
+        ctl.install(urls: panel.urls)
     }
 }
 
 @main
 struct APKRunnerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
+    @ObservedObject var ctl = AndroidController.shared
 
     var body: some Scene {
-        WindowGroup("APK Runner") {
-            ContentView()
-                .onAppear { AndroidController.shared.refresh() }
+        MenuBarExtra {
+            MenuView()
+        } label: {
+            Image(systemName: "ipad")
         }
-        .windowResizability(.contentMinSize)
-        .commands {
-            CommandGroup(replacing: .newItem) {}
-        }
+        .menuBarExtraStyle(.menu)
     }
 }

@@ -12,7 +12,7 @@ SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Library/Android/sdk}}"
 API="${API:-36}"
 BUILD_TOOLS="${BUILD_TOOLS:-36.0.0}"
 IMG="system-images;android-${API};google_apis_playstore;arm64-v8a"
-AVD="${AVD_NAME:-Android16}"
+AVD="${AVD_NAME:-AndroidTablet}"
 
 echo "==> SDK: $SDK"
 
@@ -41,10 +41,10 @@ echo "==> Скачиваю эмулятор, platform-tools, build-tools и об
 if "$SDK/emulator/emulator" -list-avds | grep -qx "$AVD"; then
   echo "==> Устройство $AVD уже есть"
 else
-  echo "==> Создаю устройство $AVD (Pixel 10, Android $API)"
+  echo "==> Создаю устройство $AVD (Pixel Tablet 2560x1600, Android $API)"
   # avdmanager может ругаться на devices.xml внутри образа, но AVD всё равно создаётся
   echo "no" | "$SDK/cmdline-tools/latest/bin/avdmanager" create avd \
-    -n "$AVD" -k "$IMG" -d pixel_10 --force >/dev/null 2>&1 || true
+    -n "$AVD" -k "$IMG" -d pixel_tablet --force >/dev/null 2>&1 || true
 
   CFG="$HOME/.android/avd/$AVD.avd/config.ini"
   if [ ! -f "$CFG" ]; then
