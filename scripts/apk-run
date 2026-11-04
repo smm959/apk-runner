@@ -1,0 +1,150 @@
+#!/bin/bash
+# apk-run — консольный хелпер для Android на Mac (к APK Runner)
+# Использование:
+#   apk-run file.apk         установить и запустить APK / XAPK / APKS / APKM
+#   apk-run start|stop       включить / выключить Android
+#   apk-run list             список установленных приложений
+#   apk-run launch <pkg>     открыть приложение по пакету
+#   apk-run remove <pkg>     удалить приложение
+#   apk-run market           открыть Play Маркет
+#   apk-run shot <file.png>  скриншот экрана Android
+#   apk-run shell            adb-шелл
+
+set -uo pipefail
+
+SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Library/Android/sdk}}"
+ADB="$SDK/platform-tools/adb"
+EMU="$SDK/emulator/emulator"
+ANALYZER="$SDK/cmdline-tools/latest/bin/apkanalyzer"
+AAPT2=$(ls -d "$SDK"/build-tools/*/aapt2 2>/dev/null | sort -V | tail -1)
+
+die() { echo "Ошибка: $*" >&2; exit 1; }
+[ -x "$ADB" ] || die "не найден adb в $ADB (запусти установку SDK)"
+[ -x "$EMU" ] || die "не найден эмулятор в $EMU"
+
+serial() {
+  "$ADB" devices | awk '/^emulator-[0-9]+\tdevice$/{print $1; exit}'
+}
+
+wait_boot() {
+  local deadline=$(( $(date +%s) + ${1:-300} ))
+  "$ADB" wait-for-device >/dev/null 2>&1
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    local s; s=$(serial)
+    if [ -n "$s" ] && [ "$("$ADB" -s "$s" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
+      echo "$s"; return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+start() {
+  if [ -n "$(serial)" ]; then echo "Android уже запущен"; return 0; fi
+  local avd; avd=$("$EMU" -list-avds | head -1)
+  [ -n "$avd" ] || die "нет созданного AVD (см. avdmanager)"
+  echo "Запускаю $avd…"
+  nohup "$EMU" -avd "$avd" -netdelay none -netspeed full -no-boot-anim \
+    > /tmp/apkrunner-emulator.log 2>&1 &
+  local s; s=$(wait_boot 420) || die "Android не загрузился, смотри /tmp/apkrunner-emulator.log"
+  echo "Готово: $s"
+}
+
+need_running() {
+  local s; s=$(serial)
+  [ -n "$s" ] || die "Android выключен — сначала: apk-run start"
+  echo "$s"
+}
+
+pkg_of_apk() {
+  local f="$1" out=""
+  if [ -n "$AAPT2" ] && [ -x "$AAPT2" ]; then
+    out=$("$AAPT2" dump packagename "$f" 2>/dev/null | tr -d '\r' | awk 'NF{print; exit}')
+  fi
+  if [ -z "$out" ]; then
+    out=$("$ANALYZER" manifest application-id "$f" 2>/dev/null | tr -d '\r' | awk 'NF{print; exit}')
+  fi
+  echo "$out"
+}
+
+install_file() {
+  local file="$1"
+  local ext; ext=$(echo "${file##*.}" | tr '[:upper:]' '[:lower:]')
+  case "$ext" in apk|apks|xapk|apkm) ;; *) die "не похоже на APK-файл: $file" ;; esac
+  local abs; abs="$(cd "$(dirname "$file")" && pwd)/$(basename "$file")"
+  [ -f "$abs" ] || die "файл не найден: $file"
+
+  local s; s=$(serial)
+  if [ -z "$s" ]; then start >/dev/null || die "Android не запустился"; s=$(serial); fi
+
+  echo "Устанавливаю $(basename "$abs")…"
+  local pkg=""
+
+  if [ "$ext" = "apk" ]; then
+    "$ADB" -s "$s" install -r -g "$abs" || die "установка не удалась"
+    pkg=$(pkg_of_apk "$abs")
+  else
+    local tmp; tmp=$(mktemp -d)
+    TMPX="$tmp"
+    trap 'rm -rf "$TMPX"' EXIT
+    /usr/bin/unzip -o -q "$abs" -d "$tmp" || die "не удалось распаковать $abs"
+    pkg=$(/usr/bin/python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('package_name',''))" "$tmp/manifest.json" 2>/dev/null)
+
+    local apks=()
+    while IFS= read -r f; do apks+=("$f"); done < <(find "$tmp" -name '*.apk' | sort)
+    [ ${#apks[@]} -gt 0 ] || die "в архиве нет APK (возможно, APKM зашифрован — такие ставить нельзя)"
+
+    local base; base=$(find "$tmp" -name '*.apk' ! -name 'config.*' | head -1)
+    [ -n "$base" ] || base="${apks[0]}"
+    if [ -z "$pkg" ]; then
+      pkg=$(pkg_of_apk "$base")
+    fi
+
+    local out
+    out=$("$ADB" -s "$s" install-multiple -r -g "${apks[@]}" 2>&1)
+    if ! echo "$out" | grep -q "Success"; then
+      out=$("$ADB" -s "$s" install -r -g "$base" 2>&1)
+      if ! echo "$out" | grep -q "Success"; then
+        echo "$out" >&2
+        if echo "$out" | grep -q "MISSING_SPLIT"; then
+          die "в этом файле не хватает сплитов для установленной версии — удали приложение (apk-run remove $pkg) и поставь заново"
+        fi
+        die "установка не удалась"
+      fi
+    fi
+
+    local obbs=()
+    while IFS= read -r f; do obbs+=("$f"); done < <(find "$tmp" -name '*.obb')
+    if [ ${#obbs[@]} -gt 0 ] && [ -n "$pkg" ]; then
+      echo "Копирую OBB-данные…"
+      "$ADB" -s "$s" shell mkdir -p "/sdcard/Android/obb/$pkg"
+      for o in "${obbs[@]}"; do
+        "$ADB" -s "$s" push "$o" "/sdcard/Android/obb/$pkg/$(basename "$o")" >/dev/null
+      done
+    fi
+  fi
+
+  if [ -n "$pkg" ]; then
+    "$ADB" -s "$s" shell monkey -p "$pkg" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 \
+      && echo "Запущено: $pkg" || echo "Установлено: $pkg (запусти вручную)"
+  else
+    echo "Установлено. Открой APK Runner или: apk-run list"
+  fi
+}
+
+cmd=${1:-}
+case "$cmd" in
+  start) start ;;
+  stop)  s=$(serial); [ -n "$s" ] && "$ADB" -s "$s" emu kill >/dev/null 2>&1; echo "Выключено" ;;
+  list)  s=$(need_running); "$ADB" -s "$s" shell pm list packages -3 | sed 's/^package://' | sort ;;
+  launch) s=$(need_running); [ $# -ge 2 ] || die "укажи пакет"
+          "$ADB" -s "$s" shell monkey -p "$2" -c android.intent.category.LAUNCHER 1 >/dev/null && echo "Открыто: $2" ;;
+  remove) s=$(need_running); [ $# -ge 2 ] || die "укажи пакет"
+          "$ADB" -s "$s" uninstall "$2" ;;
+  market) s=$(need_running); "$ADB" -s "$s" shell am start -n com.android.vending/.AssetBrowserActivity >/dev/null && echo "Play Маркет открыт" ;;
+  shot)   s=$(need_running); f=${2:-/tmp/android-shot.png}
+          "$ADB" -s "$s" exec-out screencap -p > "$f" && echo "Скриншот: $f" ;;
+  shell)  s=$(need_running); exec "$ADB" -s "$s" shell ;;
+  ""|-h|--help|help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) install_file "$1" ;;
+esac
