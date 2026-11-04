@@ -43,7 +43,7 @@ start() {
   if [ -n "$(serial)" ]; then echo "Android уже запущен"; return 0; fi
   local avd; avd=$("$EMU" -list-avds | head -1)
   [ -n "$avd" ] || die "нет созданного AVD (см. avdmanager)"
-  echo "Запускаю $avd…"
+  echo "Запускаю ${avd}…"
   nohup "$EMU" -avd "$avd" -netdelay none -netspeed full -no-boot-anim \
     > /tmp/apkrunner-emulator.log 2>&1 &
   local s; s=$(wait_boot 420) || die "Android не загрузился, смотри /tmp/apkrunner-emulator.log"
