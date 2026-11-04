@@ -45,6 +45,13 @@ if [ "${1:-}" = "--install" ]; then
   cp -R "$APP" "/Applications/APK Runner.app"
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
     -f "/Applications/APK Runner.app"
+
+  # .apk/.xapk по умолчанию должны открываться нами, а не архиватором
+  if [ -f "$ROOT/scripts/set-default-handler.swift" ]; then
+    swiftc -O "$ROOT/scripts/set-default-handler.swift" -o "$OUT/set-default-handler" 2>/dev/null \
+      && "$OUT/set-default-handler" "$BUNDLE_ID" || true
+  fi
+
   echo "Готово: /Applications/APK Runner.app"
 else
   echo "Готово: $APP"

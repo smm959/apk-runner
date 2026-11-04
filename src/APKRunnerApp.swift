@@ -1,4 +1,5 @@
 import AppKit
+import CoreServices
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -690,6 +691,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Живём только в строке меню: ни Dock-иконки, ни окон помощника.
         NSApp.setActivationPolicy(.accessory)
+
+        // Сами назначаем себя обработчиком .apk/.xapk: архиваторы вроде Keka
+        // любят перехватывать этот тип.
+        if let id = Bundle.main.bundleIdentifier {
+            LSSetDefaultRoleHandlerForContentType("public.archive.apk" as CFString, .all, id as CFString)
+        }
         AndroidController.shared.startIdleWatch()
         AndroidController.shared.refresh()
     }

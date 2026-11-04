@@ -32,6 +32,32 @@
     <string>NSApplication</string>
     <key>NSHumanReadableCopyright</key>
     <string>Обёртка над официальным Android Emulator (Android SDK). MIT.</string>
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>public.archive.apk</string>
+            <key>UTTypeDescription</key>
+            <string>Android Package</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+                <string>public.archive</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>apk</string>
+                    <string>apks</string>
+                    <string>xapk</string>
+                    <string>apkm</string>
+                </array>
+                <key>public.mime-type</key>
+                <string>application/vnd.android.package-archive</string>
+            </dict>
+        </dict>
+    </array>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
@@ -43,6 +69,7 @@
             <string>Owner</string>
             <key>LSItemContentTypes</key>
             <array>
+                <string>public.archive.apk</string>
                 <string>public.data</string>
             </array>
             <key>CFBundleTypeExtensions</key>
